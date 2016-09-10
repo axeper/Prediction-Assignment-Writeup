@@ -1,0 +1,199 @@
+---
+title: "Prediction Assignment Writeup"
+author: "Axel Perruchoud"
+date: "8 septembre 2016"
+output: 
+  html_document: 
+    keep_md: yes
+mode: selfcontained 
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Introduction
+
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit, it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify __how much__ of a particular activity they do, but they rarely quantify __how well__ they do it. 
+
+In this project, the goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: [http://groupware.les.inf.puc-rio.br/har](http://groupware.les.inf.puc-rio.br/har) (see the section on the Weight Lifting Exercise Dataset).
+
+The training data for this project are available here:
+
+[https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv)
+
+The test data are available here:
+
+[https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv](https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv)
+
+
+
+## Goal of the Assignment
+
+The goal of the project is to predict the manner in which they did the exercise. This is the `classe` variable in the training set. You may use any of the other variables to predict with. You should create a report describing:
+
+* How the model was built
+* How cross validation was used
+* What you think the expected out of sample error is
+* Why you made the choices you did
+
+The prediction model will be used to predict 20 different test cases.
+
+
+
+## Exploratory part
+
+After loading the data, we can display some information to learn more about it.
+
+```{r}
+    data <- read.csv("pml-training.csv")
+    dim(data)
+    summary(data$classe)
+```
+
+As we can see, we have a lot of variables and a lot of observations. As our goal is to predict the classe (i.e. `data$classe`), we need first to do some cleanup.
+
+
+## Preprocessing
+
+Let's split the data into a train and a test set.
+
+```{r cars, message = FALSE}
+    library(caret)
+
+    set.seed(1234)
+	inTrain <- createDataPartition(y = data$classe, p = 0.7, list = FALSE)
+	training <- data[inTrain,]
+	testing <- data[-inTrain,]
+	
+	str(training, list.len = 20)
+```
+
+When looking at the above results, there are multiple issues:
+
+1. Some columns are not useful (`X`, `user_name`, etc) and can be removed.
+2. Some columns are factor instead of numeric.
+3. Some columns are full of NAs. 
+
+Let's remediate this with a custom preprocess function.
+
+```{r, warning = FALSE}
+    preprocess <- function(df) {
+        
+        # Remove the useless first columns
+        df1 <- df[,-c(1:7)]
+        
+        # Convert factors to numeric (but not the last column)
+        indx <- sapply(df1[ , -length(df1)], is.factor)
+        df1[indx] <- lapply(df1[indx], function(x) as.numeric(as.character(x)))
+        
+        # Remove columns which are 90% NAs or more
+        sumNAs <- apply(df1, 2, function(x) sum(is.na(x)))  # Can use mean(is.na())
+        tooManyNA <- (sumNAs / dim(df1)[1]) > .9
+        df2 <- df1[, !tooManyNA]
+        df2
+    } 
+
+    # Preprocess the data
+    trainingClean <- preprocess(training)
+    testingClean <- preprocess(testing)
+    dim(trainingClean)
+```
+
+We reduced the data from 160 to 53 columns.
+
+
+## Model selection
+
+### Simple Linear Model
+We first want to try a simple linear model. Let's look at the correlations with `classe`.
+
+```{r}
+    corr <- cor(x = trainingClean[ , -length(trainingClean)], y = as.numeric(trainingClean$classe))
+    head(sort(abs(corr), decreasing = TRUE))
+```
+
+Looking at the results above, the highest correlation is about $0.34$. This is not high enough to hope good results, but let's try nevertheless.
+
+```{r}
+    ggplot(data = trainingClean, aes(classe, pitch_forearm)) + geom_boxplot(aes(fill = classe))
+```
+
+The boxplot above confirms that there is no easy linear separation between `classe` and its highest correlated variable, `pitch_forearm`.
+
+### rpart model
+
+We want to evaluate a rpart model with cross-validation.
+
+```{r, message = FALSE}
+    library(rpart)
+    train_control<- trainControl(method = "cv", number = 10, savePredictions = TRUE)
+    rpartFit <- train(classe ~ ., data = trainingClean, method = 'rpart', trControl = train_control)
+    confusionMatrix(testingClean$classe, predict(rpartFit, testingClean))$table
+```
+
+This model show a disappointing performance: the prediction table is all over the place. Next method. 
+
+
+### Random Forest Model
+
+Finally, let's try random forest with `ntree` set to 100 and with different preprocessing.
+
+```{r rf, cache = TRUE, message = FALSE, warning = FALSE}
+    Y = trainingClean$classe
+    X = trainingClean[ , -length(trainingClean)]
+    rfFit1 <- train(y = Y, x = X, method = 'rf', ntree = 100)
+    rfFit2 <- train(y = Y, x = X, method = 'rf', ntree = 100, trControl = train_control)
+    rfFit3 <- train(y = Y, x = X, method = 'rf', ntree = 100, preProcess = "pca")
+    rfFit4 <- train(y = Y, x = X, method = 'rf', ntree = 100, trControl = train_control, preProcess = "pca")
+```
+
+Our four models are: 
+
+* `rfFit1`, no train preprocessing
+* `rfFit2`, with cross-validation
+* `rfFit3`, with PCA
+* `rfFit4`, with crossvalidation and PCA
+
+
+### Model Evaluation
+
+Let's compare the accuracy of each model.
+
+```{r, dependson = 'rf'}
+    c(rfFit1.accuracy = max(rfFit1$results$Accuracy),
+      rfFit2.accuracy = max(rfFit2$results$Accuracy),
+      rfFit3.accuracy = max(rfFit3$results$Accuracy),
+      rfFit4.accuracy = max(rfFit4$results$Accuracy))
+```
+Quite amazingly, we have a 99\% accuracy for `rfFit2` as our best model.
+
+Also, we can notice that the PCA did not perform better than the non-PCA model, which was to be expected as PCA is a form of data compression. Finally, the cross-validation models (`rfFit2` and `rfFit4`) performed better than the other models.
+
+
+### Conclusion
+
+Our final model then is `rfFit2` with `mtry` set to $27$. The model was simply built using random forest with $100$ trees and cross-validation.
+
+```{r, dependson = 'rf', message = FALSE}
+    rfFit2
+    confusionMatrix(testingClean$classe, predict(rfFit2, testingClean))
+```
+
+Given the very high accuracy, the model should have an error rate lower than $5\%$, we can expect our $20$ predictions to be accurate.
+
+
+### Test Results
+
+For the test results, we can use the `predict()` function with `rfFit2`. We can also display the results predicted by the other models for curiosity.
+
+```{r, dependson = 'rf', results = "hide"}
+    testingFinal <- preprocess(read.csv("pml-testing.csv"))
+    t(cbind(
+        rfFit2 = as.data.frame(predict(rfFit2, newdata = testingFinal[, -length(testingFinal)])),
+        rfFit1 = as.data.frame(predict(rfFit1, newdata = testingFinal[, -length(testingFinal)])),
+        rfFit3 = as.data.frame(predict(rfFit3, newdata = testingFinal[, -length(testingFinal)])),
+        rfFit4 = as.data.frame(predict(rfFit4, newdata = testingFinal[, -length(testingFinal)]))))
+```
+
+Note: the results are not displayed voluntarily.
